@@ -4,6 +4,7 @@ from torch.utils.data import Dataset
 from pathlib import Path
 
 from .parsing import load_skeleton
+from .labels import get_label_from_filename
 
 def select_main_person(persons):
     """Selects person that moves the most (highest sum of distances between frames)"""
@@ -78,6 +79,6 @@ class NTUDataset(Dataset):
 
         person = torch.tensor(person, dtype=torch.float32)
 
-        label = -1
+        label = get_label_from_filename(path)
 
         return person, label
