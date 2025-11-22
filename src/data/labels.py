@@ -11,4 +11,4 @@ def get_label_from_filename(path):
     match = re.search(r"A(\d{3})", filename)
 
     action_id = int(match.group(1))
-    return action_id
+    return action_id-1

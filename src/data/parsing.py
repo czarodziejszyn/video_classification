@@ -41,13 +41,13 @@ def load_skeleton(path: str | Path):
 
             PTVC[person_id].append(joints)
 
-        persons = []
-        for person_frames in PTVC:
-            person_frames = np.array(person_frames, dtype=np.float32)
-            persons.append(person_frames)
+    persons = []
+    for person_frames in PTVC:
+        person_frames = np.array(person_frames, dtype=np.float32)
+        persons.append(person_frames)
 
-        return {
-            "num_frames": num_frames,
-            "num_persons": len(persons),
-            "persons": persons
-        }
+    return {
+        "num_frames": num_frames,
+        "num_persons": len(persons),
+        "persons": persons
+    }
