@@ -10,11 +10,19 @@ class TemporalConvolution(nn.Module):
     def __init__(self, k, d_model):
         super().__init__()
         self.conv = nn.Conv2d(d_model, d_model, (k, 1), padding=((k - 1) // 2, 0))
+        self.bn = nn.BatchNorm2d(d_model)
+        self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
+        x_res = x
+
         x = x.permute(0, 3, 1, 2)
-        out = self.conv(x)
-        return out.permute(0, 2, 3, 1)
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.relu(x)
+        out = x.permute(0, 2, 3, 1)
+
+        return out + x_res
 
 
 class TemporalSelfAttention(nn.Module):
@@ -29,12 +37,9 @@ class TemporalSelfAttention(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model)
         self.softmax = nn.Softmax(dim=-1)
         self.dropout = nn.Dropout(dropout)
-        self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x):
         B, T, V, D = x.shape
-        z = x
-        x = self.norm(x)
         q = self.q(x).view(B, T, V, self.h, self.d)
         k = self.k(x).view(B, T, V, self.h, self.d)
         v = self.v(x).view(B, T, V, self.h, self.d)
@@ -47,7 +52,7 @@ class TemporalSelfAttention(nn.Module):
         y = torch.einsum("b v h t s, b v h s d -> b v h t d", attn, v)
         y = y.permute(0,1,3,2,4).contiguous().view(B, V, T, D).permute(0,2,1,3)  # (B,T,V,D)
         out = self.out_proj(y)
-        return out + z
+        return out
 
 
 class SpatialSelfAttention(nn.Module):
@@ -62,12 +67,9 @@ class SpatialSelfAttention(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model)
         self.softmax = nn.Softmax(dim=-1)
         self.dropout = nn.Dropout(dropout)
-        self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x):
         B, T, V, D = x.shape
-        z = x
-        x = self.norm(x)
         q = self.q(x).view(B, T, V, self.h, self.d)
         k = self.k(x).view(B, T, V, self.h, self.d)
         v = self.v(x).view(B, T, V, self.h, self.d)
@@ -80,7 +82,7 @@ class SpatialSelfAttention(nn.Module):
         y = torch.einsum("b t h v u, b t h u d -> b t h v d", attn, v)
         y = y.permute(0,1,3,2,4).contiguous().view(B, T, V, D)
         out = self.out_proj(y)
-        return out + z
+        return out
 
 
 class Graph:
@@ -127,7 +129,8 @@ class GraphConvolution(nn.Module):
         graph = Graph()
         self.register_buffer('A', torch.tensor(graph.A))  # (V,V), follows device
         self.weight = nn.Parameter(torch.empty(in_features, out_features))
-        self.bias = nn.Parameter(torch.empty(out_features)) if bias else None
+        self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
+        self.bn = nn.BatchNorm2d(out_features)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -138,10 +141,27 @@ class GraphConvolution(nn.Module):
     def forward(self, x):
         B, T, V, D = x.shape
         xw = torch.einsum("btvd, df -> btvf", x, self.weight)   # (B,T,V,F)
-        out = torch.einsum("vv, btvf -> btvf", self.A, xw)      # GCN: A * XW
+        out = torch.einsum("vw, btvf -> btvf", self.A, xw)      # GCN: A * XW
         if self.bias is not None:
             out = out + self.bias
+
+        out = out.permute(0, 3, 1, 2)
+        out = self.bn(out)
+        out = F.relu(out)
+        out = out.permute(0, 2, 3, 1)
         return out
+
+
+class FeatureExtraction(nn.Module):
+    def __init__(self, d_model, k):
+        super().__init__()
+        self.gcn = GraphConvolution(d_model, d_model)
+        self.tcn = TemporalConvolution(k, d_model)
+
+    def forward(self, x):
+        x = self.gcn(x)
+        x = self.tcn(x)
+        return x
 
 
 class FeedForwardNetwork(nn.Module):
@@ -150,10 +170,11 @@ class FeedForwardNetwork(nn.Module):
         self.linear1 = nn.Linear(d_model, d_ff)
         self.linear2 = nn.Linear(d_ff, d_model)
         self.dropout = nn.Dropout(0.1)
+        self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
         x = self.linear1(x)
-        x = F.relu(x, inplace=True)
+        x = self.relu(x)
         x = self.dropout(x)
         x = self.linear2(x)
         return x
@@ -164,32 +185,46 @@ class TransformerLayer(nn.Module):
         super().__init__()
         self.tsa = TemporalSelfAttention(d_model, num_heads, dropout)
         self.ssa = SpatialSelfAttention(d_model, num_heads, dropout)
+
+        self.norm1_s = nn.LayerNorm(d_model)
+        self.norm1_t = nn.LayerNorm(d_model)
+
         self.tcn = TemporalConvolution(k, d_model)
         self.gcn = GraphConvolution(d_model, d_model)
-        self.ffn = FeedForwardNetwork(d_model, d_ff)
 
-        self.norm_s = nn.LayerNorm(d_model)
-        self.norm_t = nn.LayerNorm(d_model)
+
+        self.norm2_s = nn.LayerNorm(d_model)
+        self.norm2_t = nn.LayerNorm(d_model)
+
+        self.ffn = FeedForwardNetwork(d_model, d_ff)
         self.norm_out = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x_s, x_t):
+    def forward(self, x):
         # Spatial stream: SSA + TCN
-        xs_res = x_s
-        x_s = self.ssa(self.norm_s(x_s))
-        x_s = self.tcn(x_s)
-        x_s = x_s + xs_res
+        xs = x
+        y = self.norm1_s(xs)
+        y = self.ssa(y)
+        xs = xs + y
+
+        y = self.norm2_s(xs)
+        y = self.tcn(y)
+        xs = xs + y
 
         # Temporal stream: GCN + TSA
-        xt_res = x_t
-        x_t = self.gcn(self.norm_t(x_t))
-        x_t = self.tsa(x_t)
-        x_t = x_t + xt_res
+        xt = x
+        y = self.norm1_t(xt)
+        y = self.gcn(y)
+        y = self.tsa(y)
+        xt = xt + y
 
         # Fusion + FFN
-        x = self.dropout(self.ffn(x_s + x_t))
-        x = self.norm_out(x)
-        return x
+        fused = xs + xt
+        z = self.ffn(fused)
+        z = self.dropout(z)
+        out = fused + z
+        out = self.norm_out(out)
+        return out
 
 
 class TransformerEncoder(nn.Module):
@@ -197,34 +232,37 @@ class TransformerEncoder(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList([TransformerLayer(d_model, num_heads, d_ff, dropout, k) for _ in range(num_layers)])
 
-    def forward(self, x_s, x_t):
+    def forward(self, x):
         for layer in self.layers:
-            x = layer(x_s, x_t)
-            x_s, x_t = x, x
+            x = layer(x)
         return x
 
 
 class STTransformer(nn.Module):
-    def __init__(self, num_classes=120, d_model=64, num_heads=8, d_ff=64, num_layers=6, dropout=0.1, k=9, num_node=25, T_max=300):
+    def __init__(self, num_classes=120, d_model=64, num_heads=8, d_ff=256, num_layers=6, dropout=0.1, k=9, num_node=25, T_max=100):
         super().__init__()
         self.input_embedding = InputEmbedding(d_model=d_model)
         self.input_encoding = InputEncoding(num_node=num_node, d_model=d_model, T_max=T_max)
+        self.extractor = FeatureExtraction(d_model, k=k)
         self.encoder = TransformerEncoder(d_model, num_heads, d_ff, num_layers, dropout, k)
         self.head = nn.Linear(d_model, num_classes)
 
     def forward(self, x):
         # x: (B,T,V,3)
-        B, T, V, D = x.shape
-        x = self.input_embedding(x)      # (B,T,V,D)
+        B, T, V, D_in = x.shape
+        x = self.input_embedding(x)      # (B,T,V,d_model)
 
-        pos_enc = self.input_encoding.temporal_encoding(T)  # (T,D)
-        spa_enc = self.input_encoding.spatial_encoding(V)   # (V,D)
+        pos_enc = self.input_encoding.temporal_encoding(T).to(x.device)  # (T,D)
+        spa_enc = self.input_encoding.spatial_encoding(V).to(x.device)   # (V,D)
 
-        x_pos = x + pos_enc.unsqueeze(0).unsqueeze(2)  # (1,T,1,D)
-        x_spa = x + spa_enc.unsqueeze(0).unsqueeze(1)  # (1,1,V,D)
+        x = x + pos_enc.unsqueeze(0).unsqueeze(2)  # (1,T,1,D)
+        x = x + spa_enc.unsqueeze(0).unsqueeze(1)  # (1,1,V,D)
+
+        x = self.extractor(x) #(B,T,V,D)
 
 
-        x = self.encoder(x_pos, x_spa)           # fused stream
+        x = self.encoder(x)           # fused stream
+
         x = x.mean(dim=[1, 2])           # global average over (T,V): (B,D)
         logits = self.head(x)            # (B,C)
         return logits

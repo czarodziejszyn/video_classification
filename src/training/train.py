@@ -16,18 +16,24 @@ def train(model, train_loader, val_loader, optimizer, scheduler, cfg):
     device = cfg["device"]
     epochs = cfg["epochs"]
     resume = cfg.get("resume", False)
-    criterion = nn.CrossEntropyLoss()
+    warmup_epochs = cfg.get("warmup_epochs", 5)
+
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     start_epoch = 1
+    best_acc = 0.0
 
     # resume training
     if resume and os.path.exists(last_checkpoint_path()):
         print(f"Resuming from checkpoint: {last_checkpoint_path()}")
-        start_epoch = load_checkpoint(
+        start_epoch, best_acc = load_checkpoint(
             model, optimizer, scheduler, last_checkpoint_path()
-        ) + 1
+        )
+        start_epoch += 1
 
     model.to(device)
+
+    scaler = torch.cuda.amp.GradScaler(enabled=(device == "cuda"))
 
     # metrics csv
     metrics_file = metrics_csv_path()
@@ -39,7 +45,7 @@ def train(model, train_loader, val_loader, optimizer, scheduler, cfg):
     if write_header:
         csv_writer.writerow(["epoch", "train_loss", "train_acc", "val_loss", "val_acc", "lr"])
 
-    # TRAINING
+    # TRAINING LOOP
     for epoch in range(start_epoch, epochs + 1):
         print(f"\nEpoch {epoch}/{epochs}")
         model.train()
@@ -48,35 +54,50 @@ def train(model, train_loader, val_loader, optimizer, scheduler, cfg):
         train_acc = 0
         sample_count = 0
 
-        for x, label in tqdm(train_loader, desc="Training"):
+        for x, label in tqdm(train_loader, desc=f"Training"):
             x = x.to(device)
             label = label.to(device)
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
-            out = model(x)
-            loss = criterion(out, label)
+            # mixed precision
+            with torch.cuda.amp.autocast(enabled=(device=="cuda")):
+                out = model(x)
+                loss = criterion(out, label)
 
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
 
-            from src.utils.metrics import accuracy
-            acc1 = accuracy(out, label, topk=(1,))[0]
+            # gradient clipping
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+            scaler.step(optimizer)
+            scaler.update()
+
+            # accuracy
+            pred = out.argmax(dim=1)
+            correct = (pred == label).sum().item()
 
             batch_size = x.size(0)
             train_loss += loss.item() * batch_size
-            train_acc += acc1 * batch_size
+            train_acc += correct
             sample_count += batch_size
 
         train_loss /= sample_count
-        train_acc /= sample_count
+        train_acc = 100.0 * train_acc / sample_count
 
+        # validation
         val_loss, val_acc = validate(model, val_loader, criterion, device)
 
-        if scheduler is not None:
+        # warm-up
+        if epoch <= warmup_epochs:
+            lr_scale = epoch / warmup_epochs
+            for pg in optimizer.param_groups:
+                pg["lr"] = cfg["lr"] * lr_scale
+            lr = optimizer.param_groups[0]["lr"]
+        else:
             scheduler.step()
-
-        lr = optimizer.param_groups[0]["lr"]
+            lr = optimizer.param_groups[0]["lr"]
 
         print(f"Train: loss={train_loss:.4f}, acc={train_acc:.2f}%")
         print(f"Val:   loss={val_loss:.4f}, acc={val_acc:.2f}%, lr={lr:.6f}")
@@ -84,23 +105,8 @@ def train(model, train_loader, val_loader, optimizer, scheduler, cfg):
         csv_writer.writerow([epoch, train_loss, train_acc, val_loss, val_acc, lr])
         csv_file.flush()
 
-        save_checkpoint(
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            epoch=epoch,
-            cfg=cfg,
-            path=checkpoint_path(epoch),
-        )
-        save_checkpoint(
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            epoch=epoch,
-            cfg=cfg,
-            path=last_checkpoint_path(),
-        )
-
-        print(f"Checkpoint saved: epoch_{epoch:03d}.pt")
+        # save checkpoints
+        save_checkpoint(model, optimizer, scheduler, epoch, cfg, last_checkpoint_path())
+        save_checkpoint(model, optimizer, scheduler, epoch, cfg, checkpoint_path(epoch))
 
     csv_file.close()
