@@ -1,7 +1,7 @@
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
 from src.data.dataset import NTUDataset
 from src.models.st_transformer import STTransformer
@@ -19,12 +19,31 @@ def main():
     model = STTransformer(num_classes=120)
 
     lr = 0.0006
+    epochs = 50
+    warmup_epochs = 5
 
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.1)
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
+    warmup_scheduler = LinearLR(
+        optimizer,
+        start_factor=0.01,
+        end_factor=1.0,
+        total_iters=epochs
+    )
+
+    cosine_scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=epochs - warmup_epochs,
+        eta_min=1e-6
+    )
+
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_epochs]
+    )
 
     cfg = {
-        "epochs": 80,
+        "epochs": epochs,
         "warmup_epochs": 5,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
         "resume": True,
