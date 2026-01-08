@@ -8,13 +8,25 @@ from src.models.st_transformer import STTransformer
 from src.training.train import train
 from src.utils.paths import RAW_DATA_DIR
 
+def collate_skip_bad(batch):
+    # batch to lista tupli (data, label) zwracanych przez __getitem__
+    # Filtrujemy te, gdzie label == -1
+    batch = [sample for sample in batch if sample[1] != -1]
+    
+    # Jeśli cały batch okazał się wadliwy, zwracamy puste tensory 
+    # (rzadka sytuacja, ale warto obsłużyć)
+    if len(batch) == 0:
+        return torch.Tensor(), torch.Tensor()
+        
+    return torch.utils.data.dataloader.default_collate(batch)
+
 def main():
 
     train_set = NTUDataset(RAW_DATA_DIR, split="train")
-    val_set = NTUDataset(RAW_DATA_DIR, split="val")
+    val_set = NTUDataset(RAW_DATA_DIR, split="test")
 
-    train_loader = DataLoader(train_set, batch_size=16, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_set, batch_size=16, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_set, batch_size=16, shuffle=True, num_workers=4, collate_fn=collate_skip_bad)
+    val_loader = DataLoader(val_set, batch_size=16, shuffle=False, num_workers=4, collate_fn=collate_skip_bad)
 
     model = STTransformer(num_classes=120)
 
