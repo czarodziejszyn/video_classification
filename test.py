@@ -9,10 +9,20 @@ from src.data.dataset import NTUDataset
 from src.models.st_transformer import STTransformer
 from src.utils.paths import RAW_DATA_DIR
 
+def top_k_accuracy(outputs, labels, k=5):
+    _, topk = outputs.topk(k, dim=1)
+    correct = topk.eq(labels.view(-1, 1).expand_as(topk))
+    return correct.any(dim=1).float().mean().item()
+
+
 def evaluate_model(model, dataloader, device="cuda"):
     model.eval()
     all_preds = []
     all_labels = []
+
+    top1_correct = 0
+    top5_correct = 0
+    total_samples = 0
 
     with torch.no_grad():
         for x, y in dataloader:
@@ -20,6 +30,14 @@ def evaluate_model(model, dataloader, device="cuda"):
             y = y.to(device)
 
             outputs = model(x)
+
+            _, top5 = outputs.topk(5, dim=1)     # (B, 5)
+            top1 = top5[:, 0]                     # najlepsza predykcja
+
+            top1_correct += (top1 == y).sum().item()
+            top5_correct += (top5 == y.unsqueeze(1)).any(dim=1).sum().item()
+            total_samples += y.size(0)
+
             preds = outputs.argmax(dim=1)
 
             all_preds.append(preds.cpu())
@@ -27,6 +45,12 @@ def evaluate_model(model, dataloader, device="cuda"):
 
     all_preds = torch.cat(all_preds)
     all_labels = torch.cat(all_labels)
+
+    top1_acc = top1_correct / total_samples
+    top5_acc = top5_correct / total_samples
+
+    print(f"Top-1 Accuracy: {top1_acc:.4f}")
+    print(f"Top-5 Accuracy: {top5_acc:.4f}")
 
     acc = accuracy_score(all_labels, all_preds)
     print(f"Overall accuracy: {acc:.4f}")
@@ -42,7 +66,14 @@ def evaluate_model(model, dataloader, device="cuda"):
     plt.title("Confusion Matrix")
     plt.show()
 
-    return all_preds, all_labels, cm
+    return {
+        "top1": top1_acc,
+        "top5": top5_acc,
+        "accuracy": acc,
+        "confusion_matrix": cm,
+        "preds": all_preds,
+        "labels": all_labels
+    }
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
