@@ -9,12 +9,8 @@ from src.training.train import train
 from src.utils.paths import RAW_DATA_DIR
 
 def collate_skip_bad(batch):
-    # batch to lista tupli (data, label) zwracanych przez __getitem__
-    # Filtrujemy te, gdzie label == -1
     batch = [sample for sample in batch if sample[1] != -1]
-    
-    # Jeśli cały batch okazał się wadliwy, zwracamy puste tensory 
-    # (rzadka sytuacja, ale warto obsłużyć)
+
     if len(batch) == 0:
         return torch.Tensor(), torch.Tensor()
         
