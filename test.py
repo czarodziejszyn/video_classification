@@ -87,7 +87,6 @@ def main():
     model.load_state_dict(checkpoint["model"])
     model.to(device)
 
-    # Ewaluacja
     evaluate_model(model, test_loader, device)
 
 if __name__ == "__main__":
